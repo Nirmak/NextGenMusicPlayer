@@ -206,7 +206,8 @@ class StreamingOutputTests(unittest.TestCase):
             def __init__(self):
                 self.stream_used = False
 
-            def chat(self, model, messages, stream_callback=None):
+            def chat(self, model, messages, stream_callback=None, *, force_json=False):
+                assert force_json, "Expected chat to enforce JSON format"
                 parts = ['{"index": 1, "reason": "Tes', 't stream"}']
                 if stream_callback:
                     self.stream_used = True

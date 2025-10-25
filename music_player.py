@@ -380,10 +380,14 @@ class OllamaClient:
         model: str,
         messages: List[Dict[str, str]],
         stream_callback: Optional[Callable[[str], None]] = None,
+        *,
+        force_json: bool = False,
     ) -> str:
         url = f"{self._base_url}/api/chat"
         stream = stream_callback is not None
-        payload = {"model": model, "messages": messages, "stream": stream}
+        payload: Dict[str, Any] = {"model": model, "messages": messages, "stream": stream}
+        if force_json:
+            payload["format"] = "json"
         try:
             response = self._requests.post(url, json=payload, timeout=120, stream=stream)
         except self._requests.RequestException as exc:  # pragma: no cover
@@ -409,8 +413,12 @@ class OllamaClient:
                 continue
             if event.get("error"):
                 raise RuntimeError(f"Ollama error: {event['error']}")
-            message = event.get("message") or {}
-            delta = message.get("content") or ""
+
+            message = event.get("message")
+            if isinstance(message, dict):
+                delta = message.get("content") or ""
+            else:
+                delta = ""
             if delta:
                 chunks.append(delta)
                 if stream_callback:
@@ -626,48 +634,68 @@ class MusicPlayerCLI:
         user_message = self._build_ai_prompt(playlist, prompt)
         messages.append({"role": "user", "content": user_message})
 
-        chat_kwargs: Dict[str, Any] = {}
-        printed_stream = False
-        last_chunk_had_newline = True
-        if self._stream_ai:
-            def handle_chunk(chunk: str) -> None:
-                nonlocal printed_stream, last_chunk_had_newline
-                if not printed_stream:
-                    print("AI response (streaming):", flush=True)
-                    printed_stream = True
-                sys.stdout.write(chunk)
-                sys.stdout.flush()
-                last_chunk_had_newline = chunk.endswith("\n")
+        max_attempts = 3
+        payload: Optional[Dict[str, Any]] = None
+        reply = ""
 
-            chat_kwargs["stream_callback"] = handle_chunk
+        for attempt in range(1, max_attempts + 1):
+            chat_kwargs: Dict[str, Any] = {"force_json": True}
+            printed_stream = False
+            last_chunk_had_newline = True
 
-        try:
-            reply = self._ollama.chat(model, messages, **chat_kwargs)
-        except TypeError:
-            if chat_kwargs:
-                print("AI client does not support streaming; falling back to buffered response.")
+            if self._stream_ai:
+
+                def handle_chunk(chunk: str) -> None:
+                    nonlocal printed_stream, last_chunk_had_newline
+                    if not printed_stream:
+                        print("AI response (streaming):", flush=True)
+                        printed_stream = True
+                    sys.stdout.write(chunk)
+                    sys.stdout.flush()
+                    last_chunk_had_newline = chunk.endswith("\n")
+
+                chat_kwargs["stream_callback"] = handle_chunk
+
+            try:
+                reply = self._ollama.chat(model, messages, **chat_kwargs)
+            except TypeError:
+                # Fallback for custom clients without streaming/format support.
+                if chat_kwargs.get("stream_callback"):
+                    print("AI client does not support streaming; falling back to buffered response.")
                 reply = self._ollama.chat(model, messages)
                 printed_stream = False
                 last_chunk_had_newline = True
-            else:
-                messages.pop()
-                raise
-        except Exception as exc:  # pragma: no cover
+            except Exception as exc:  # pragma: no cover
+                if printed_stream and not last_chunk_had_newline:
+                    print()
+                messages.pop()  # remove user message on failure
+                raise RuntimeError(f"Ollama request failed: {exc}") from exc
+
             if printed_stream and not last_chunk_had_newline:
                 print()
-            messages.pop()
-            raise RuntimeError(f"Ollama request failed: {exc}") from exc
 
-        if printed_stream and not last_chunk_had_newline:
-            print()
+            try:
+                payload = self._parse_ai_payload(reply)
+                self._validate_ai_payload(payload)
+            except ValueError as exc:
+                print(f"AI response invalid (attempt {attempt}/{max_attempts}): {exc}")
+                messages.append({"role": "assistant", "content": reply})
+                correction = (
+                    "That reply was invalid. Respond again with exactly one JSON object "
+                    '{"index": <int|null>, "reason": "<short explanation>"} with valid JSON syntax.'
+                )
+                messages.append({"role": "user", "content": correction})
+                if attempt >= max_attempts:
+                    raise RuntimeError("AI failed to provide a valid JSON response.") from exc
+                continue
 
-        messages.append({"role": "assistant", "content": reply})
+            messages.append({"role": "assistant", "content": reply})
+            break
+
+        if payload is None:
+            raise RuntimeError("AI failed to provide a response.")
+
         self._trim_ai_history(model)
-
-        try:
-            payload = self._parse_ai_payload(reply)
-        except ValueError as exc:
-            raise ValueError("Failed to interpret AI response:\n" + reply) from exc
 
         index, reason = self._interpret_ai_choice(payload, playlist)
         if index is None:
@@ -708,7 +736,10 @@ class MusicPlayerCLI:
                     + "\n".join(f"- {label}" for label in recent)
                 )
         sections.append(f"User request: {prompt}")
-        sections.append("Remember: respond with JSON only.")
+        sections.append(
+            'Respond with exactly one JSON object: {"index": <int|null>, "reason": "<short explanation>"}.\n'
+            "No extra keys, code fences, or commentary. Invalid JSON will be rejected."
+        )
         return "\n\n".join(sections)
 
     @staticmethod
@@ -726,6 +757,18 @@ class MusicPlayerCLI:
         if not isinstance(data, dict):
             raise ValueError("JSON response must be an object.")
         return data
+
+    @staticmethod
+    def _validate_ai_payload(payload: Dict[str, Any]) -> None:
+        if "index" not in payload:
+            raise ValueError("Missing required field 'index'.")
+        index_value = payload["index"]
+        if index_value is not None and not isinstance(index_value, int):
+            raise ValueError("Field 'index' must be an integer or null.")
+
+        reason = payload.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("Field 'reason' must be a non-empty string.")
 
     def _interpret_ai_choice(
         self, payload: Dict[str, Any], playlist: List[Track]
