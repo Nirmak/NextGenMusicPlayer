@@ -41,7 +41,7 @@ SUPPORTED_EXTENSIONS = {
 class Track:
     uri: str
     label: str
-    metadata: Dict[str, str] = field(default_factory=dict)
+    metadata: Dict[str, str] = field(default_factory=dict, compare=False)
     category: str = "song"
 
 
@@ -482,7 +482,9 @@ class MusicPlayer:
             sys.stderr.write(f"GStreamer error: {err}\n")
             if debug:
                 sys.stderr.write(f"Debug info: {debug}\n")
-            self.stop()
+            next_track = self.next_track(auto=True)
+            if not next_track:
+                self.stop()
 
 
 class OllamaClient:
@@ -687,28 +689,38 @@ class MusicPlayerCLI:
                 print("Usage: queue add <idx...>")
                 return
             playlist = self._player.playlist()
-            added: List[Track] = []
+            indices: List[int] = []
             for token in parts[1:]:
                 try:
                     idx = int(token)
                 except ValueError:
                     print(f"Invalid index '{token}'.")
                     continue
-                try:
-                    track = self._player.queue_track(idx)
-                except IndexError as exc:
-                    print(str(exc))
+                if idx < 0 or idx >= len(playlist):
+                    print(f"Track index {idx} is out of range.")
                     continue
-                added.append(track)
-                print(f"Queued [{idx}]: {track.label}")
-            if not added:
+                indices.append(idx)
+            if not indices:
                 print("No tracks were added to the queue.")
+            else:
+                self._enqueue_indexes(indices, playlist, auto_start=True)
+                for idx in indices:
+                    if 0 <= idx < len(playlist):
+                        track = playlist[idx]
+                        print(f"Queued [{idx}]: {track.label}")
         elif action == "list":
             queue = self._player.queue()
             if not queue:
                 print("Queue is empty.")
                 return
             playlist = self._player.playlist()
+            current = getattr(self._player, "current_track", lambda: None)()
+            if current:
+                try:
+                    current_idx = playlist.index(current)
+                    print(f"Currently playing [{current_idx}]: {self._render_track_line(current_idx, current)}")
+                except ValueError:
+                    print(f"Currently playing: {current.label}")
             print("Queued tracks:")
             for position, track in enumerate(queue, start=1):
                 try:
@@ -858,30 +870,30 @@ class MusicPlayerCLI:
                 print()
 
             candidate_track: Optional[Track] = None
+            sanitized_indexes: List[int] = []
             try:
                 payload = self._parse_ai_payload(reply)
                 self._validate_ai_payload(payload)
-                candidate_index = payload["index"]
-                if candidate_index < 0 or candidate_index >= len(playlist):
-                    raise ValueError("Selected index is out of range.")
+                sanitized_indexes = self._sanitize_indexes(
+                    payload.get("indexes", []), playlist, allow_spoken=allow_spoken
+                )
+                if not sanitized_indexes:
+                    raise ValueError("No valid song indexes provided.")
+                payload["indexes"] = sanitized_indexes
+                candidate_index = sanitized_indexes[0]
                 candidate_track = playlist[candidate_index]
-                category = self._track_category(candidate_track)
-                if category != "song" and not allow_spoken:
-                    raise ValueError(
-                        f"Selected track '{candidate_track.label}' is categorized as {category}."
-                    )
             except (ValueError, IndexError) as exc:
                 print(f"AI response invalid (attempt {attempt}/{max_attempts}): {exc}")
                 messages.append({"role": "assistant", "content": reply})
                 if candidate_track and self._track_category(candidate_track) != "song" and not allow_spoken:
                     correction = (
-                        f"'{candidate_track.label}' is not a music track. Please choose a song that sounds like actual music."
+                        f"'{candidate_track.label}' is not a music track. Please choose five SONG indexes instead."
                     )
                 else:
                     correction = (
                         "That reply was invalid. Respond again with exactly one JSON object "
-                        '{"index": <int>, "reason": "<short explanation>"} using valid JSON syntax. '
-                        "Always choose a track—never reply with null or say nothing fits."
+                        '{"indexes": [<int>, ...], "reason": "<short explanation>"} using valid JSON syntax. '
+                        "Always choose songs—never reply with null or say nothing fits."
                     )
                 messages.append({"role": "user", "content": correction})
                 if attempt >= max_attempts:
@@ -889,7 +901,7 @@ class MusicPlayerCLI:
                     if fallback_index is None:
                         raise RuntimeError("AI failed to provide a valid JSON response.") from exc
                     payload = {
-                        "index": fallback_index,
+                        "indexes": [fallback_index],
                         "reason": "Fallback selection due to repeated invalid AI responses.",
                     }
                     print("AI response invalid after multiple attempts. Falling back to automatic selection.")
@@ -904,32 +916,43 @@ class MusicPlayerCLI:
             if fallback_index is None:
                 raise RuntimeError("AI failed to provide a response.")
             payload = {
-                "index": fallback_index,
+                "indexes": [fallback_index],
                 "reason": "Fallback selection due to missing AI response.",
             }
 
         self._trim_ai_history(model)
 
-        index, reason = self._interpret_ai_choice(payload, playlist)
-        if index is None:
+        index, reason, extras = self._interpret_ai_choice(payload, playlist, allow_spoken)
+        all_indexes: List[int] = []
+        if index is not None:
+            all_indexes.append(index)
+        all_indexes.extend(extras)
+
+        if not all_indexes:
             fallback_index = self._fallback_track_index(playlist, allow_spoken)
             if fallback_index is None:
                 print(f"AI response: {reason or json.dumps(payload, indent=2)}")
                 return
             print(f"AI response unusable; falling back to [{fallback_index}].")
-            track = self._player.play(fallback_index)
+            self._player.clear_queue()
+            self._enqueue_indexes([fallback_index], playlist, allow_spoken=allow_spoken, auto_start=False)
+            track = self._player.play()
             if track:
                 print("Reason: Using fallback selection because AI response was unusable.")
             return
 
-        track = self._player.play(index)
-        if not track:
-            print(f"AI suggested index {index}, but it is not available.")
-            return
-
-        print(f"AI selected [{index}]: {track.label}")
-        if reason:
-            print(f"Reason: {reason}")
+        self._player.clear_queue()
+        self._enqueue_indexes(all_indexes, playlist, allow_spoken=allow_spoken, auto_start=False)
+        track = self._player.play()
+        if track:
+            try:
+                playlist_index = playlist.index(track)
+            except ValueError:
+                playlist_index = -1
+            idx_display = f"[{playlist_index}]" if playlist_index >= 0 else "(queued track)"
+            print(f"AI selected {idx_display}: {track.label}")
+            if reason:
+                print(f"Reason: {reason}")
 
     def _get_or_create_ai_session(self, model: str) -> List[Dict[str, str]]:
         session = self._ai_sessions.get(model)
@@ -974,9 +997,10 @@ class MusicPlayerCLI:
         )
         sections.append(f"User request: {prompt}")
         sections.append(
-            'Respond with exactly one JSON object: {"index": <int>, "reason": "<short explanation>"}.\n'
+            'Respond with exactly one JSON object: {"indexes": [<int>, ...], "reason": "<short explanation>"}.\n'
+            "Always provide up to five unique song indexes (first = best match, rest = strong alternatives). "
             "No extra keys, code fences, or commentary. Pick from the song list above unless the user explicitly requests spoken-word content. "
-            "Invalid JSON or null indexes will be rejected."
+            "Invalid JSON or empty index lists will be rejected."
         )
         return "\n\n".join(sections)
 
@@ -998,11 +1022,21 @@ class MusicPlayerCLI:
 
     @staticmethod
     def _validate_ai_payload(payload: Dict[str, Any]) -> None:
-        if "index" not in payload:
-            raise ValueError("Missing required field 'index'.")
-        index_value = payload["index"]
-        if not isinstance(index_value, int) or index_value < 0:
-            raise ValueError("Field 'index' must be a non-negative integer.")
+        indexes_raw = payload.get("indexes")
+        normalized: List[int] = []
+        if isinstance(indexes_raw, list):
+            for value in indexes_raw:
+                idx = MusicPlayerCLI._coerce_index(value)
+                if isinstance(idx, int) and idx >= 0:
+                    normalized.append(idx)
+        else:
+            idx = MusicPlayerCLI._coerce_index(payload.get("index"))
+            if isinstance(idx, int) and idx >= 0:
+                normalized.append(idx)
+        if not normalized:
+            raise ValueError("Field 'indexes' must contain at least one non-negative integer.")
+        payload["indexes"] = list(dict.fromkeys(normalized[:5]))
+
         reason = payload.get("reason")
         if not isinstance(reason, str) or not reason.strip():
             raise ValueError("Field 'reason' must be a non-empty string.")
@@ -1071,13 +1105,79 @@ class MusicPlayerCLI:
     def _track_category(track: Track) -> str:
         return (track.metadata.get("category") or track.category or "unknown").lower()
 
+    def _sanitize_indexes(self, indexes: Iterable[int], playlist: List[Track], allow_spoken: bool = False) -> List[int]:
+        sanitized: List[int] = []
+        for idx in indexes:
+            if not isinstance(idx, int):
+                continue
+            if idx < 0 or idx >= len(playlist):
+                continue
+            if not allow_spoken and self._track_category(playlist[idx]) != "song":
+                continue
+            if idx not in sanitized:
+                sanitized.append(idx)
+        return sanitized
+
+    def _enqueue_indexes(
+        self,
+        indexes: Iterable[int],
+        playlist: List[Track],
+        allow_spoken: bool = False,
+        auto_start: bool = False,
+    ) -> None:
+        pending = self._sanitize_indexes(indexes, playlist, allow_spoken=allow_spoken)
+        if not pending:
+            return
+        existing_indexes: set[int] = set()
+        for queued_track in self._player.queue():
+            try:
+                existing_indexes.add(playlist.index(queued_track))
+            except ValueError:
+                continue
+        new_items = False
+        for idx in pending:
+            if idx < 0 or idx >= len(playlist):
+                continue
+            if idx in existing_indexes:
+                continue
+            try:
+                self._player.queue_track(idx)
+            except IndexError:
+                continue
+            existing_indexes.add(idx)
+            new_items = True
+        if new_items and auto_start:
+            try:
+                self._player.play()
+            except Exception:  # pragma: no cover
+                pass
+
+    def _is_index_allowed(self, index: int, playlist: List[Track], allow_spoken: bool) -> bool:
+        if index < 0 or index >= len(playlist):
+            return False
+        if allow_spoken:
+            return True
+        return self._track_category(playlist[index]) == "song"
+
     def _interpret_ai_choice(
-        self, payload: Dict[str, Any], playlist: List[Track]
-    ) -> Tuple[Optional[int], str]:
+        self, payload: Dict[str, Any], playlist: List[Track], allow_spoken: bool
+    ) -> Tuple[Optional[int], str, List[int]]:
+        reason = self._extract_reason(payload)
+
+        indexes_field = payload.get("indexes")
+        if isinstance(indexes_field, list) and indexes_field:
+            sanitized = self._sanitize_indexes(indexes_field, playlist, allow_spoken=allow_spoken)
+            if sanitized:
+                return sanitized[0], reason or "Using indexes from AI response.", sanitized[1:]
+
         index = self._extract_index(payload)
         reason = self._extract_reason(payload)
-        if isinstance(index, int) and 0 <= index < len(playlist):
-            return index, reason or "Using index from AI response."
+        if (
+            isinstance(index, int)
+            and 0 <= index < len(playlist)
+            and (allow_spoken or self._track_category(playlist[index]) == "song")
+        ):
+            return index, reason or "Using index from AI response.", []
 
         title_candidates: List[str] = []
 
@@ -1100,13 +1200,13 @@ class MusicPlayerCLI:
         ):
             value = payload.get(key)
             idx_candidate = self._coerce_index(value)
-            if isinstance(idx_candidate, int) and 0 <= idx_candidate < len(playlist):
-                return idx_candidate, reason or "Using index from AI response."
+            if isinstance(idx_candidate, int) and self._is_index_allowed(idx_candidate, playlist, allow_spoken):
+                return idx_candidate, reason or "Using index from AI response.", []
             if isinstance(value, (list, tuple)):
                 for entry in value:
                     idx_candidate = self._coerce_index(entry)
-                    if isinstance(idx_candidate, int) and 0 <= idx_candidate < len(playlist):
-                        return idx_candidate, reason or "Using index from AI response."
+                    if isinstance(idx_candidate, int) and self._is_index_allowed(idx_candidate, playlist, allow_spoken):
+                        return idx_candidate, reason or "Using index from AI response.", []
                     if isinstance(entry, dict):
                         add_candidate(entry.get("title"))
                         add_candidate(entry.get("name"))
@@ -1139,23 +1239,25 @@ class MusicPlayerCLI:
         for title in title_candidates:
             matched = self._match_track_by_title(title, playlist)
             if matched is not None:
-                return matched, reason or f"Matched requested title '{title}'."
+                if self._is_index_allowed(matched, playlist, allow_spoken):
+                    return matched, reason or f"Matched requested title '{title}'.", []
 
         index_from_text = self._extract_index_from_text(
             payload.get("response"), payload.get("message")
         )
         if isinstance(index_from_text, int) and 0 <= index_from_text < len(playlist):
-            return index_from_text, reason or "Using index from AI response."
+                if self._is_index_allowed(index_from_text, playlist, allow_spoken):
+                    return index_from_text, reason or "Using index from AI response.", []
 
         message = payload.get("message")
         if isinstance(message, str):
             title_guess = self._extract_title_from_message(message)
             if title_guess:
                 matched = self._match_track_by_title(title_guess, playlist)
-                if matched is not None:
-                    return matched, reason or f"Matched inferred title '{title_guess}'."
+                if matched is not None and self._is_index_allowed(matched, playlist, allow_spoken):
+                    return matched, reason or f"Matched inferred title '{title_guess}'.", []
 
-        return None, reason
+        return None, reason, []
 
     @staticmethod
     def _extract_index(payload: Dict[str, Any]) -> Optional[int]:
@@ -1292,8 +1394,8 @@ class MusicPlayerCLI:
     def _build_system_prompt(self) -> str:
         context = self._system_context or "You are a helpful DJ assistant."
         instructions = (
-            "You must respond with exactly one JSON object of the form {\"index\": <int>, \"reason\": \"<short explanation>\"}.\n"
-            "You must always return an integer index referencing a song from the playlist summary.\n"
+            "You must respond with exactly one JSON object of the form {\"indexes\": [<int>, ...], \"reason\": \"<short explanation>\"}.\n"
+            "Always return up to five unique song indexes (first = best match to play now, the rest are alternatives).\n"
             "Return JSON only—no narration before or after the object."
         )
         catalog = self._ai_track_summary or "Playlist is currently empty."

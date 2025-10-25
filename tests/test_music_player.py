@@ -78,6 +78,9 @@ class DummyPlayer:
     def clear_queue(self):
         self._queue.clear()
 
+    def current_track(self):
+        return self.last_played
+
 
 class PlaybackHistoryTests(unittest.TestCase):
     def test_history_persists_to_disk(self):
@@ -196,9 +199,10 @@ class ResponseParsingTests(unittest.TestCase):
 
     def test_numeric_track_field(self):
         payload = {"track": 2}
-        index, reason = self.cli._interpret_ai_choice(payload, self.playlist)
+        index, reason, extras = self.cli._interpret_ai_choice(payload, self.playlist, allow_spoken=False)
         self.assertEqual(index, 2)
         self.assertTrue(reason)
+        self.assertEqual(extras, [])
 
     def test_recommendation_and_alternatives(self):
         payload = {
@@ -208,25 +212,29 @@ class ResponseParsingTests(unittest.TestCase):
                 "One",
             ],
         }
-        index, _ = self.cli._interpret_ai_choice(payload, self.playlist)
+        index, _, extras = self.cli._interpret_ai_choice(payload, self.playlist, allow_spoken=False)
         self.assertEqual(index, 3)
+        self.assertEqual(extras, [])
 
     def test_playlist_string(self):
         payload = {"playlist": "Two"}
-        index, _ = self.cli._interpret_ai_choice(payload, self.playlist)
+        index, _, extras = self.cli._interpret_ai_choice(payload, self.playlist, allow_spoken=False)
         self.assertEqual(index, 2)
+        self.assertEqual(extras, [])
 
     def test_selected_track_field(self):
         payload = {"selected_track": "Two"}
-        index, reason = self.cli._interpret_ai_choice(payload, self.playlist)
+        index, reason, extras = self.cli._interpret_ai_choice(payload, self.playlist, allow_spoken=False)
         self.assertEqual(index, 2)
         self.assertTrue(reason)
+        self.assertEqual(extras, [])
 
     def test_response_with_bracket_index(self):
         payload = {"response": "Requested '[2] Two' "}
-        index, reason = self.cli._interpret_ai_choice(payload, self.playlist)
+        index, reason, extras = self.cli._interpret_ai_choice(payload, self.playlist, allow_spoken=False)
         self.assertEqual(index, 2)
         self.assertTrue(reason)
+        self.assertEqual(extras, [])
 
     def test_parse_ai_payload_strips_think(self):
         raw = "<think>internal</think>{\"index\": 1}"
@@ -239,6 +247,7 @@ class StreamingOutputTests(unittest.TestCase):
         playlist = [
             Track("file:///0", "Zero"),
             Track("file:///1", "One"),
+            Track("file:///2", "Two"),
         ]
 
         class DummyOllama:
@@ -247,7 +256,7 @@ class StreamingOutputTests(unittest.TestCase):
 
             def chat(self, model, messages, stream_callback=None, *, force_json=False):
                 assert force_json, "Expected chat to enforce JSON format"
-                parts = ['{"index": 1, "reason": "Tes', 't stream"}']
+                parts = ['{"indexes": [1, 2], "reason": "Tes', 't stream"}']
                 if stream_callback:
                     self.stream_used = True
                     for chunk in parts:
@@ -269,8 +278,10 @@ class StreamingOutputTests(unittest.TestCase):
 
         self.assertTrue(ollama.stream_used)
         self.assertIn("AI response (streaming):", output)
-        self.assertIn('{"index": 1, "reason": "Test stream"}', output)
+        self.assertIn('{"indexes": [1, 2], "reason": "Test stream"}', output)
         self.assertIn("AI selected [1]: One", output)
+        self.assertIn("Reason: Test stream", output)
+        self.assertEqual([track.label for track in player.queue()], ["Two"])
 
 
 class PayloadValidationTests(unittest.TestCase):
@@ -278,13 +289,20 @@ class PayloadValidationTests(unittest.TestCase):
         from music_player import MusicPlayerCLI
 
         with self.assertRaises(ValueError):
-            MusicPlayerCLI._validate_ai_payload({"index": None, "reason": "nope"})
+            MusicPlayerCLI._validate_ai_payload({"indexes": [None], "reason": "nope"})
 
     def test_reject_negative_index(self):
         from music_player import MusicPlayerCLI
 
         with self.assertRaises(ValueError):
-            MusicPlayerCLI._validate_ai_payload({"index": -1, "reason": "nope"})
+            MusicPlayerCLI._validate_ai_payload({"indexes": [-1], "reason": "nope"})
+
+    def test_single_index_field_normalized(self):
+        from music_player import MusicPlayerCLI
+
+        payload = {"index": 2, "reason": "ok"}
+        MusicPlayerCLI._validate_ai_payload(payload)
+        self.assertEqual(payload["indexes"], [2])
 
 
 class FallbackSelectionTests(unittest.TestCase):
@@ -297,7 +315,7 @@ class FallbackSelectionTests(unittest.TestCase):
         class NullOllama:
             def chat(self, model, messages, stream_callback=None, *, force_json=False):
                 assert force_json
-                return '{"index": null, "reason": "nothing"}'
+                return '{"indexes": [null], "reason": "nothing"}'
 
         player = DummyPlayer(playlist)
         cli = MusicPlayerCLI(
@@ -313,6 +331,8 @@ class FallbackSelectionTests(unittest.TestCase):
 
         self.assertIsNotNone(player.last_played)
         self.assertEqual(player.last_played.label, "Zero")
+        # queue should remain empty when fallback is used
+        self.assertEqual(player.queue(), [])
 
 
 class QueueCommandTests(unittest.TestCase):
@@ -324,7 +344,7 @@ class QueueCommandTests(unittest.TestCase):
         ]
         player = DummyPlayer(playlist)
         cli = MusicPlayerCLI(player, default_model="model", catalog_path=None, stream_ai=False)
-
+        player.play(1)
         with contextlib.redirect_stdout(io.StringIO()) as buffer:
             cli._cmd_queue(["add", "0", "2"])
         output = buffer.getvalue()
@@ -344,7 +364,9 @@ class QueueCommandTests(unittest.TestCase):
         ]
         player = DummyPlayer(playlist)
         cli = MusicPlayerCLI(player, default_model="model", catalog_path=None, stream_ai=False)
-        cli._cmd_queue(["add", "0"])
+        player.play(1)
+        cli._cmd_queue(["add", "0", "1"])
+        # First suggestion plays immediately, remaining stay queued
         self.assertTrue(player.queue())
         cli._cmd_queue(["clear"])
         self.assertFalse(player.queue())

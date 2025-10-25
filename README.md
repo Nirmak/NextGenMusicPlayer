@@ -4,7 +4,7 @@ This project is a terminal-first music player that wraps GStreamer playback with
 ## Key Features
 - CLI-driven playback: load directories, start/stop music, navigate the queue, and inspect the playlist without leaving the terminal.
 - Flexible media sources: works with normal folders, `file://` URIs, and remote shares (e.g., SMB) through Gio.
-- AI track selection: optional integration with an Ollama model that receives playlist metadata, a configurable DJ persona (tuned to avoid episodic content), and prioritises unplayed songs—responses are forced into a strict JSON schema.
+- AI track selection: optional integration with an Ollama model that receives playlist metadata, a configurable DJ persona (tuned to avoid episodic content), prioritises unplayed songs, and returns up to five matching tracks (first plays immediately, the rest enqueue).
 - Ad-hoc song queue: build a temporary play queue from the loaded library without losing the full playlist.
 - Live streaming of AI responses so you can watch progress instead of waiting on a blank terminal.
 - Automatic cataloguing: exports the loaded playlist to `playlist_catalog.txt` and stores recent selections in `playback_history.json`.
@@ -82,8 +82,8 @@ When AI support is enabled:
 2. `dj_context.txt` (or your custom file) is merged with instructions about response format.
 3. Playback history is still recorded locally for your reference, but it is no longer shared with the AI.
 4. The DJ persona instructs the model to lean on known artists/songs, keep its internal reasoning succinct, avoid episodic/podcast-style tracks, and prefer songs you have not heard recently.
-5. The player forces Ollama into JSON mode and rejects any reply that lacks the exact `{"index": <int>, "reason": "..."}` schema (or tries to decline); after repeated failures it falls back to an automatic pick.
-6. Free-form input or `/ai ...` calls `OllamaClient`; the validated JSON response drives playback, with a fallback track chosen if the response is unusable.
+5. The player forces Ollama into JSON mode and rejects any reply that lacks the exact `{"indexes": [<int>, ...], "reason": "..."}` schema (or tries to decline); after repeated failures it falls back to an automatic pick.
+6. Free-form input or `/ai ...` calls `OllamaClient`; the validated JSON response drives playback. The first index plays immediately and the remaining (up to four) are appended to the temporary queue.
 7. While the model composes a reply, its output streams live in the terminal so you can confirm it is still working.
 
 Replace `dj_context.txt` to change the model’s persona or constraints. To disable AI completely, set `ollama_url` to an empty string in the config or use `--ollama-url ""` at runtime.
