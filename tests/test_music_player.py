@@ -246,5 +246,47 @@ class StreamingOutputTests(unittest.TestCase):
         self.assertIn("AI selected [1]: One", output)
 
 
+class PayloadValidationTests(unittest.TestCase):
+    def test_reject_null_index(self):
+        from music_player import MusicPlayerCLI
+
+        with self.assertRaises(ValueError):
+            MusicPlayerCLI._validate_ai_payload({"index": None, "reason": "nope"})
+
+    def test_reject_negative_index(self):
+        from music_player import MusicPlayerCLI
+
+        with self.assertRaises(ValueError):
+            MusicPlayerCLI._validate_ai_payload({"index": -1, "reason": "nope"})
+
+
+class FallbackSelectionTests(unittest.TestCase):
+    def test_fallback_when_ai_returns_null_repeatedly(self):
+        playlist = [
+            Track("file:///0", "Zero"),
+            Track("file:///1", "One"),
+        ]
+
+        class NullOllama:
+            def chat(self, model, messages, stream_callback=None, *, force_json=False):
+                assert force_json
+                return '{"index": null, "reason": "nothing"}'
+
+        player = DummyPlayer(playlist)
+        cli = MusicPlayerCLI(
+            player,
+            ollama_client=NullOllama(),
+            default_model="model",
+            catalog_path=None,
+            stream_ai=False,
+        )
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli._cmd_ai(["Pick", "something"])
+
+        self.assertIsNotNone(player.last_played)
+        self.assertEqual(player.last_played.label, "Zero")
+
+
 if __name__ == "__main__":
     unittest.main()

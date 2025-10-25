@@ -703,24 +703,46 @@ class MusicPlayerCLI:
                 messages.append({"role": "assistant", "content": reply})
                 correction = (
                     "That reply was invalid. Respond again with exactly one JSON object "
-                    '{"index": <int|null>, "reason": "<short explanation>"} with valid JSON syntax.'
+                    '{"index": <int>, "reason": "<short explanation>"} using valid JSON syntax. '
+                    "Always choose a track—never reply with null or say nothing fits."
                 )
                 messages.append({"role": "user", "content": correction})
                 if attempt >= max_attempts:
-                    raise RuntimeError("AI failed to provide a valid JSON response.") from exc
+                    fallback_index = self._fallback_track_index(playlist)
+                    if fallback_index is None:
+                        raise RuntimeError("AI failed to provide a valid JSON response.") from exc
+                    payload = {
+                        "index": fallback_index,
+                        "reason": "Fallback selection due to repeated invalid AI responses.",
+                    }
+                    print("AI response invalid after multiple attempts. Falling back to automatic selection.")
+                    break
                 continue
 
             messages.append({"role": "assistant", "content": reply})
             break
 
         if payload is None:
-            raise RuntimeError("AI failed to provide a response.")
+            fallback_index = self._fallback_track_index(playlist)
+            if fallback_index is None:
+                raise RuntimeError("AI failed to provide a response.")
+            payload = {
+                "index": fallback_index,
+                "reason": "Fallback selection due to missing AI response.",
+            }
 
         self._trim_ai_history(model)
 
         index, reason = self._interpret_ai_choice(payload, playlist)
         if index is None:
-            print(f"AI response: {reason or json.dumps(payload, indent=2)}")
+            fallback_index = self._fallback_track_index(playlist)
+            if fallback_index is None:
+                print(f"AI response: {reason or json.dumps(payload, indent=2)}")
+                return
+            print(f"AI response unusable; falling back to [{fallback_index}].")
+            track = self._player.play(fallback_index)
+            if track:
+                print("Reason: Using fallback selection because AI response was unusable.")
             return
 
         track = self._player.play(index)
@@ -758,8 +780,9 @@ class MusicPlayerCLI:
                 )
         sections.append(f"User request: {prompt}")
         sections.append(
-            'Respond with exactly one JSON object: {"index": <int|null>, "reason": "<short explanation>"}.\n'
-            "No extra keys, code fences, or commentary. Invalid JSON will be rejected."
+            'Respond with exactly one JSON object: {"index": <int>, "reason": "<short explanation>"}.\n'
+            "No extra keys, code fences, or commentary. Always pick a track (prefer one not in the recent list). "
+            "Invalid JSON or null indexes will be rejected."
         )
         return "\n\n".join(sections)
 
@@ -784,12 +807,25 @@ class MusicPlayerCLI:
         if "index" not in payload:
             raise ValueError("Missing required field 'index'.")
         index_value = payload["index"]
-        if index_value is not None and not isinstance(index_value, int):
-            raise ValueError("Field 'index' must be an integer or null.")
-
+        if not isinstance(index_value, int) or index_value < 0:
+            raise ValueError("Field 'index' must be a non-negative integer.")
         reason = payload.get("reason")
         if not isinstance(reason, str) or not reason.strip():
             raise ValueError("Field 'reason' must be a non-empty string.")
+
+    def _fallback_track_index(self, playlist: List[Track]) -> Optional[int]:
+        if not playlist:
+            return None
+        history_labels: List[str] = []
+        if self._history:
+            history_labels = self._dedupe_preserve_order(
+                self._history.recent_labels(limit=len(playlist) * 2)
+            )
+        history_set = set(history_labels)
+        for idx, track in enumerate(playlist):
+            if track.label not in history_set:
+                return idx
+        return 0
 
     def _interpret_ai_choice(
         self, payload: Dict[str, Any], playlist: List[Track]
