@@ -703,7 +703,7 @@ class MusicPlayerCLI:
             if not indices:
                 print("No tracks were added to the queue.")
             else:
-                self._enqueue_indexes(indices, playlist, auto_start=True)
+                self._enqueue_indexes(indices, playlist, allow_spoken=False, auto_start=True)
                 for idx in indices:
                     if 0 <= idx < len(playlist):
                         track = playlist[idx]
@@ -833,6 +833,8 @@ class MusicPlayerCLI:
         payload: Optional[Dict[str, Any]] = None
         reply = ""
 
+        chat_only = False
+
         for attempt in range(1, max_attempts + 1):
             chat_kwargs: Dict[str, Any] = {"force_json": True}
             printed_stream = False
@@ -873,6 +875,18 @@ class MusicPlayerCLI:
             sanitized_indexes: List[int] = []
             try:
                 payload = self._parse_ai_payload(reply)
+            except ValueError:
+                payload = None
+
+            if payload is None:
+                if not printed_stream:
+                    print(reply)
+                messages.append({"role": "assistant", "content": reply})
+                self._trim_ai_history(model)
+                chat_only = True
+                break
+
+            try:
                 self._validate_ai_payload(payload)
                 sanitized_indexes = self._sanitize_indexes(
                     payload.get("indexes", []), playlist, allow_spoken=allow_spoken
@@ -910,6 +924,9 @@ class MusicPlayerCLI:
 
             messages.append({"role": "assistant", "content": reply})
             break
+
+        if chat_only:
+            return
 
         if payload is None:
             fallback_index = self._fallback_track_index(playlist, allow_spoken)

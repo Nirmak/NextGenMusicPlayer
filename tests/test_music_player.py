@@ -335,6 +335,36 @@ class FallbackSelectionTests(unittest.TestCase):
         self.assertEqual(player.queue(), [])
 
 
+class PlainTextResponseTests(unittest.TestCase):
+    def test_plain_text_response_printed_and_no_queue(self):
+        playlist = [
+            Track("file:///0", "Zero"),
+            Track("file:///1", "One"),
+        ]
+
+        class ChatOllama:
+            def chat(self, model, messages, stream_callback=None, *, force_json=False):
+                assert force_json
+                return "Sure, let's talk about music preferences."
+
+        player = DummyPlayer(playlist)
+        cli = MusicPlayerCLI(
+            player,
+            ollama_client=ChatOllama(),
+            default_model="model",
+            catalog_path=None,
+            stream_ai=False,
+        )
+
+        with contextlib.redirect_stdout(io.StringIO()) as buffer:
+            cli._cmd_ai(["What", "do", "you", "think", "of", "ambient", "music?"])
+        output = buffer.getvalue()
+
+        self.assertIn("let's talk about music preferences", output)
+        self.assertIsNone(player.last_played)
+        self.assertEqual(player.queue(), [])
+
+
 class QueueCommandTests(unittest.TestCase):
     def test_queue_add_and_list(self):
         playlist = [
