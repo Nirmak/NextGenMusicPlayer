@@ -4,7 +4,8 @@ This project is a terminal-first music player that wraps GStreamer playback with
 ## Key Features
 - CLI-driven playback: load directories, start/stop music, navigate the queue, and inspect the playlist without leaving the terminal.
 - Flexible media sources: works with normal folders, `file://` URIs, and remote shares (e.g., SMB) through Gio.
-- AI track selection: optional integration with an Ollama model that receives playlist metadata, a configurable DJ persona (tuned to avoid episodic content), and recent history before recommending a track—responses are forced into a strict JSON schema and the DJ prioritises unplayed songs.
+- AI track selection: optional integration with an Ollama model that receives playlist metadata, a configurable DJ persona (tuned to avoid episodic content), and prioritises unplayed songs—responses are forced into a strict JSON schema.
+- Ad-hoc song queue: build a temporary play queue from the loaded library without losing the full playlist.
 - Live streaming of AI responses so you can watch progress instead of waiting on a blank terminal.
 - Automatic cataloguing: exports the loaded playlist to `playlist_catalog.txt` and stores recent selections in `playback_history.json`.
 - Metadata awareness: extracts tags with Mutagen when available and infers missing titles/artists from file paths.
@@ -68,6 +69,9 @@ Commands are prefixed with `/`; free-form text triggers the AI DJ (when enabled)
 | `/list` | Display the playlist with the current track highlighted. |
 | `/current` | Show the currently playing track. |
 | `/ai <prompt>` | Manually send a prompt to the AI assistant. |
+| `/queue add <idx...>` | Append one or more tracks to the temporary play queue. |
+| `/queue list` | Display queued tracks in order. |
+| `/queue clear` | Empty the play queue. |
 | `/resethistory`, `/resetchat` | Clear persisted history or the current AI conversation. |
 | `/help` | Show available commands. |
 | `/quit` | Exit the player. |
@@ -76,7 +80,7 @@ Commands are prefixed with `/`; free-form text triggers the AI DJ (when enabled)
 When AI support is enabled:
 1. The current playlist is summarised to `playlist_catalog.txt`.
 2. `dj_context.txt` (or your custom file) is merged with instructions about response format.
-3. Recent plays from `playback_history.json` are deduplicated and inserted into the system prompt.
+3. Playback history is still recorded locally for your reference, but it is no longer shared with the AI.
 4. The DJ persona instructs the model to lean on known artists/songs, keep its internal reasoning succinct, avoid episodic/podcast-style tracks, and prefer songs you have not heard recently.
 5. The player forces Ollama into JSON mode and rejects any reply that lacks the exact `{"index": <int>, "reason": "..."}` schema (or tries to decline); after repeated failures it falls back to an automatic pick.
 6. Free-form input or `/ai ...` calls `OllamaClient`; the validated JSON response drives playback, with a fallback track chosen if the response is unusable.

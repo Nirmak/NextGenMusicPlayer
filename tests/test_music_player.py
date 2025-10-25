@@ -3,6 +3,7 @@ import io
 import json
 import tempfile
 import unittest
+from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,6 +25,7 @@ class DummyPlayer:
         self._playlist = list(playlist)
         self._callback = None
         self.last_played = None
+        self._queue = deque()
 
     def playlist(self):
         return list(self._playlist)
@@ -34,7 +36,13 @@ class DummyPlayer:
     def play(self, index=None):
         if not self._playlist:
             return None
-        if index is None:
+        if index is None and self._queue:
+            track = self._queue.popleft()
+            try:
+                index = self._playlist.index(track)
+            except ValueError:
+                index = 0
+        elif index is None:
             index = 0
         if index < 0 or index >= len(self._playlist):
             raise IndexError
@@ -56,6 +64,19 @@ class DummyPlayer:
             'with_genre': count('genre'),
             'with_date': count('date'),
         }
+
+    def queue_track(self, index):
+        if index < 0 or index >= len(self._playlist):
+            raise IndexError
+        track = self._playlist[index]
+        self._queue.append(track)
+        return track
+
+    def queue(self):
+        return list(self._queue)
+
+    def clear_queue(self):
+        self._queue.clear()
 
 
 class PlaybackHistoryTests(unittest.TestCase):
@@ -90,7 +111,7 @@ class PromptGenerationTests(unittest.TestCase):
         cli._ai_track_summary = cli._generate_catalog_summary(playlist)
         return cli
 
-    def test_ai_prompt_includes_recent_history(self):
+    def test_ai_prompt_excludes_recent_history(self):
         history = PlaybackHistory(None, max_entries=5)
         history.add(Track("file:///one", "Song One"))
         history.add(Track("file:///two", "Song Two"))
@@ -102,23 +123,17 @@ class PromptGenerationTests(unittest.TestCase):
         cli = self._make_cli(playlist, history)
 
         prompt = cli._build_ai_prompt(playlist, "Play something nice")
-        self.assertIn("Song One", prompt)
-        self.assertIn("Song Two", prompt)
-        # Ensure duplicated recent entries are deduplicated
-        history.add(Track("file:///one", "Song One"))
-        prompt_again = cli._build_ai_prompt(playlist, "Another one")
-        self.assertIn("Song One", prompt_again)
-        history_section = prompt_again.split("Recently played tracks", 1)[1]
-        self.assertEqual(history_section.count("Song One"), 1)
+        self.assertNotIn("Recently played tracks", prompt)
+        self.assertNotIn("Song One", prompt.split("Available songs", 1)[0])
 
-    def test_system_prompt_mentions_history(self):
+    def test_system_prompt_no_longer_mentions_history(self):
         history = PlaybackHistory(None, max_entries=5)
         history.add(Track("file:///one", "Song One"))
         playlist = [Track("file:///one", "Song One")]
         cli = self._make_cli(playlist, history)
         cli.refresh_ai_playlist()
         system_prompt = cli._build_system_prompt()
-        self.assertIn("Song One", system_prompt)
+        self.assertNotIn("Recently played tracks", system_prompt)
 
 
 class MetadataAugmentationTests(unittest.TestCase):
@@ -298,6 +313,41 @@ class FallbackSelectionTests(unittest.TestCase):
 
         self.assertIsNotNone(player.last_played)
         self.assertEqual(player.last_played.label, "Zero")
+
+
+class QueueCommandTests(unittest.TestCase):
+    def test_queue_add_and_list(self):
+        playlist = [
+            Track("file:///0", "Zero"),
+            Track("file:///1", "One"),
+            Track("file:///2", "Two"),
+        ]
+        player = DummyPlayer(playlist)
+        cli = MusicPlayerCLI(player, default_model="model", catalog_path=None, stream_ai=False)
+
+        with contextlib.redirect_stdout(io.StringIO()) as buffer:
+            cli._cmd_queue(["add", "0", "2"])
+        output = buffer.getvalue()
+        self.assertIn("Queued [0]", output)
+        self.assertIn("Queued [2]", output)
+
+        with contextlib.redirect_stdout(io.StringIO()) as buffer:
+            cli._cmd_queue(["list"])
+        output = buffer.getvalue()
+        self.assertIn("Zero", output)
+        self.assertIn("Two", output)
+
+    def test_queue_clear(self):
+        playlist = [
+            Track("file:///0", "Zero"),
+            Track("file:///1", "One"),
+        ]
+        player = DummyPlayer(playlist)
+        cli = MusicPlayerCLI(player, default_model="model", catalog_path=None, stream_ai=False)
+        cli._cmd_queue(["add", "0"])
+        self.assertTrue(player.queue())
+        cli._cmd_queue(["clear"])
+        self.assertFalse(player.queue())
 
 
 if __name__ == "__main__":

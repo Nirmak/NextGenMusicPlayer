@@ -11,7 +11,8 @@ import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
+from collections import deque
+from typing import Any, Callable, Deque, Dict, Iterable, List, Optional, Tuple, Union
 from urllib.parse import unquote, urlparse
 
 import re
@@ -333,6 +334,7 @@ class MusicPlayer:
             raise RuntimeError("Failed to create GStreamer playbin element.")
         self._playlist: List[Track] = []
         self._current_index: Optional[int] = None
+        self._queue: Deque[Track] = deque()
         self._lock = threading.RLock()
         self._track_callback: Optional[Callable[[Track], None]] = None
 
@@ -354,6 +356,7 @@ class MusicPlayer:
                 self.stop()
                 self._playlist = tracks
                 self._current_index = 0 if tracks else None
+                self._queue.clear()
             else:
                 if not self._playlist and tracks:
                     self._current_index = 0
@@ -365,7 +368,11 @@ class MusicPlayer:
             if not self._playlist:
                 return None
             if index is None:
-                index = self._current_index or 0
+                queue_index = self._next_queue_index_locked()
+                if queue_index is not None:
+                    index = queue_index
+                else:
+                    index = self._current_index or 0
             if index < 0 or index >= len(self._playlist):
                 raise IndexError(f"Track index {index} is out of range.")
             return self._set_track_and_play(index)
@@ -386,6 +393,9 @@ class MusicPlayer:
         with self._lock:
             if not self._playlist:
                 return None
+            queue_index = self._next_queue_index_locked()
+            if queue_index is not None:
+                return self._set_track_and_play(queue_index)
             if self._current_index is None:
                 next_index = 0
             elif auto:
@@ -417,6 +427,22 @@ class MusicPlayer:
         with self._lock:
             return list(self._playlist)
 
+    def queue_track(self, index: int) -> Track:
+        with self._lock:
+            if index < 0 or index >= len(self._playlist):
+                raise IndexError(f"Track index {index} is out of range.")
+            track = self._playlist[index]
+            self._queue.append(track)
+            return track
+
+    def queue(self) -> List[Track]:
+        with self._lock:
+            return list(self._queue)
+
+    def clear_queue(self) -> None:
+        with self._lock:
+            self._queue.clear()
+
     def shutdown(self) -> None:
         with self._lock:
             self._playbin.set_state(Gst.State.NULL)
@@ -438,6 +464,15 @@ class MusicPlayer:
             except Exception:  # pragma: no cover
                 pass
         return track
+
+    def _next_queue_index_locked(self) -> Optional[int]:
+        while self._queue:
+            track = self._queue.popleft()
+            try:
+                return self._playlist.index(track)
+            except ValueError:
+                continue
+        return None
 
     def _on_bus_message(self, _bus: Gst.Bus, message: Gst.Message) -> None:
         if message.type == Gst.MessageType.EOS:
@@ -540,7 +575,12 @@ class MusicPlayerCLI:
     def run(self) -> None:
         print("Simple Music Player")
         print(
-            "Commands: /load <dir>, /play [index], /pause, /resume, /stop, /next, /prev, /list, /current, /resethistory, /resetchat, /help, /quit"
+            "Commands overview:\n"
+            "  Playback: /load, /play, /pause, /resume, /stop, /next, /prev\n"
+            "  Queue:    /queue add <idx...>, /queue list, /queue clear\n"
+            "  Library:  /list, /current\n"
+            "  AI:       /ai <prompt>\n"
+            "  Misc:     /resethistory, /resetchat, /help, /quit"
         )
         print("Tip: just type a sentence to let the AI pick a track. Prefix commands with '/'.")
         while True:
@@ -589,6 +629,8 @@ class MusicPlayerCLI:
                 print(f"Playing: {track.label}")
         elif cmd == "ai":
             self._cmd_ai(args)
+        elif cmd == "queue":
+            self._cmd_queue(args)
         elif cmd == "list":
             self._cmd_list()
         elif cmd == "current":
@@ -634,6 +676,58 @@ class MusicPlayerCLI:
         else:
             print("Playlist is empty.")
 
+    def _cmd_queue(self, args: Iterable[str]) -> None:
+        parts = list(args)
+        if not parts:
+            print("Usage: queue add <idx...> | queue list | queue clear")
+            return
+        action = parts[0].lower()
+        if action == "add":
+            if len(parts) == 1:
+                print("Usage: queue add <idx...>")
+                return
+            playlist = self._player.playlist()
+            added: List[Track] = []
+            for token in parts[1:]:
+                try:
+                    idx = int(token)
+                except ValueError:
+                    print(f"Invalid index '{token}'.")
+                    continue
+                try:
+                    track = self._player.queue_track(idx)
+                except IndexError as exc:
+                    print(str(exc))
+                    continue
+                added.append(track)
+                print(f"Queued [{idx}]: {track.label}")
+            if not added:
+                print("No tracks were added to the queue.")
+        elif action == "list":
+            queue = self._player.queue()
+            if not queue:
+                print("Queue is empty.")
+                return
+            playlist = self._player.playlist()
+            print("Queued tracks:")
+            for position, track in enumerate(queue, start=1):
+                try:
+                    idx = playlist.index(track)
+                except ValueError:
+                    idx = -1
+                if idx >= 0:
+                    label = self._render_track_line(idx, track)
+                    print(f"  {position}. {label}")
+                else:
+                    summary = self._metadata_summary(track.metadata)
+                    extra = f" | {summary}" if summary else ""
+                    print(f"  {position}. {track.label}{extra}")
+        elif action == "clear":
+            self._player.clear_queue()
+            print("Queue cleared.")
+        else:
+            print("Usage: queue add <idx...> | queue list | queue clear")
+
     def _cmd_list(self) -> None:
         playlist = self._player.playlist()
         if not playlist:
@@ -646,21 +740,27 @@ class MusicPlayerCLI:
 
     def _print_help(self) -> None:
         print(
-            "Commands (prefix with '/'):\n"
-            "  /load <dir>          Load supported audio files from a local directory or SMB URI\n"
-            "  /play [idx]          Start playback of current track or the specified index\n"
-            "  /pause               Pause playback\n"
-            "  /resume              Resume playback\n"
-            "  /stop                Stop playback\n"
-            "  /next                Skip to the next track (wraps around)\n"
-            "  /prev                Return to the previous track\n"
-            "  /ai [--model NAME] <prompt>  Ask an Ollama model to choose a track\n"
-            "  /list                Show playlist with indexes\n"
-            "  /current             Show the currently selected track\n"
-            "  /resethistory        Clear the persisted playback history\n"
-            "  /resetchat           Clear AI conversation memory\n"
-            "  /help                Show this message\n"
-            "  /quit                Exit the player\n"
+            "Available commands (prefix with '/'):\n"
+            "Playback:\n"
+            "  /load <dir>           Load audio files from a directory or SMB URI\n"
+            "  /play [idx]           Start playback of current track or the specified index\n"
+            "  /pause | /resume      Control playback\n"
+            "  /stop                 Stop playback\n"
+            "  /next | /prev         Move through the playlist (queue takes priority)\n"
+            "Queue management:\n"
+            "  /queue add <idx...>   Append one or more tracks to the temporary queue\n"
+            "  /queue list           Show queued tracks in order\n"
+            "  /queue clear          Empty the queue\n"
+            "Library info:\n"
+            "  /list                 Show the library with indexes\n"
+            "  /current              Display the currently playing track\n"
+            "AI integration:\n"
+            "  /ai [--model NAME] <prompt>  Ask the DJ assistant to pick a song\n"
+            "Maintenance:\n"
+            "  /resethistory         Clear persisted playback history\n"
+            "  /resetchat            Clear AI conversation memory\n"
+            "  /help                 Show this help text\n"
+            "  /quit                 Exit the player\n"
             "\nWithout '/', your input is sent to the AI using the default model."
         )
 
@@ -872,13 +972,6 @@ class MusicPlayerCLI:
             " When 'Category=song' you must treat it as music. If the category is anything else"
             " (e.g., 'spoken-word'), treat it as narration/podcast and avoid it unless the user explicitly asks for it."
         )
-        if self._history:
-            recent = self._dedupe_preserve_order(self._history.recent_labels(limit=10))
-            if recent:
-                sections.append(
-                    "Recently played tracks (most recent first; prefer new selections when possible, but reuse if needed):\n"
-                    + "\n".join(f"- {label}" for label in recent)
-                )
         sections.append(f"User request: {prompt}")
         sections.append(
             'Respond with exactly one JSON object: {"index": <int>, "reason": "<short explanation>"}.\n'
@@ -1203,25 +1296,13 @@ class MusicPlayerCLI:
             "You must always return an integer index referencing a song from the playlist summary.\n"
             "Return JSON only—no narration before or after the object."
         )
-        recent = self._recent_history_summary()
         catalog = self._ai_track_summary or "Playlist is currently empty."
         return (
             f"{context}\n"
             f"{instructions}\n\n"
-            "Recently played tracks (most recent first; prefer new selections when possible, but reuse if needed):\n"
-            f"{recent}\n\n"
             "Current playlist catalog:\n"
             f"{catalog}"
         )
-
-    def _recent_history_summary(self, limit: int = 10) -> str:
-        if not self._history:
-            return "None yet."
-        recent = self._history.recent_labels(limit)
-        recent = self._dedupe_preserve_order(recent)
-        if not recent:
-            return "None yet."
-        return "\n".join(f"- {label}" for label in recent)
 
     def _update_system_prompts(self) -> None:
         prompt = self._build_system_prompt()
