@@ -127,8 +127,20 @@ class MetadataAugmentationTests(unittest.TestCase):
         label = 'Artist Name/Album Title/My Song - Live.mp3'
         metadata = _augment_metadata_from_label(label, {})
         self.assertEqual(metadata.get('title'), 'My Song - Live')
-        self.assertEqual(metadata.get('album'), 'Album Title')
+        self.assertEqual(metadata.get('album'), 'Unknown')
         self.assertEqual(metadata.get('artist'), 'Artist Name')
+
+    def test_preserve_existing_album_metadata(self):
+        from music_player import _augment_metadata_from_label
+        label = 'Some Artist/Some Folder/Track.mp3'
+        metadata = _augment_metadata_from_label(label, {'album': 'Existing Album'})
+        self.assertEqual(metadata.get('album'), 'Existing Album')
+
+    def test_case_insensitive_album_metadata(self):
+        from music_player import _augment_metadata_from_label
+        label = 'Artist/Folder/Song.mp3'
+        metadata = _augment_metadata_from_label(label, {'Album': 'Proper Album'})
+        self.assertEqual(metadata.get('album'), 'Proper Album')
 
 class ResetHistoryTests(unittest.TestCase):
     def test_reset_history(self):

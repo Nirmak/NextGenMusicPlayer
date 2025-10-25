@@ -88,23 +88,44 @@ def _augment_metadata_from_label(label: str, metadata: Dict[str, str]) -> Dict[s
     decoded = unquote(label)
     parts = decoded.split("/")
     filename = Path(decoded).name
-    updated = dict(metadata)
-    if not updated.get("title"):
+    updated: Dict[str, str] = {}
+
+    # Normalise existing metadata (strip whitespace, preserve original keys).
+    for key, value in metadata.items():
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            updated[key] = text
+
+    def has_field(name: str) -> bool:
+        """Return True if metadata already supplies a non-empty value for the field."""
+        for key, value in list(updated.items()):
+            if key.lower() == name and str(value).strip():
+                # Ensure canonical lowercase alias is present.
+                if key != name:
+                    updated[name] = str(value).strip()
+                return True
+        return False
+
+    def set_field(name: str, value: str) -> None:
+        if value:
+            updated[name] = value
+
+    if not has_field("title"):
         title = Path(filename).stem.replace("_", " ").strip()
         if title:
-            updated["title"] = title
-    if not updated.get("album") and len(parts) >= 2:
-        album = parts[-2].replace("_", " ").strip()
-        if album:
-            updated["album"] = album
-    if not updated.get("artist"):
+            set_field("title", title)
+    if not has_field("album"):
+        set_field("album", "Unknown")
+    if not has_field("artist"):
         candidate = ""
         if len(parts) >= 3:
             candidate = parts[-3].replace("_", " ").strip()
         elif " - " in filename:
             candidate = filename.split(" - ", 1)[0].replace("_", " ").strip()
         if candidate:
-            updated["artist"] = candidate
+            set_field("artist", candidate)
     return updated
 
 
