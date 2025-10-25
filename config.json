@@ -1,0 +1,9 @@
+{
+  "default_music_uri": "smb://nirmak_syn.local/music/",
+  "default_ai_model": "qwen3:8b",
+  "ollama_url": "http://127.0.0.1:11434",
+  "ai_catalog_path": "playlist_catalog.txt",
+  "ai_context_path": "dj_context.txt",
+  "ai_history_limit": 50,
+  "ai_history_path": "playback_history.json"
+}
