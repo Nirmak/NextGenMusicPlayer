@@ -1129,6 +1129,39 @@ class MusicPlayerCLI:
         text = prompt.strip().lower()
         if not text:
             return False
+        if "?" in text:
+            return True
+
+        tokens = re.findall(r"[a-z0-9']+", text)
+        token_set = set(tokens)
+
+        chat_phrases = (
+            "what do you",
+            "tell me",
+            "do you know",
+            "let's talk",
+        )
+        if any(phrase in text for phrase in chat_phrases):
+            return True
+        chat_tokens = {
+            "hello",
+            "hi",
+            "hey",
+            "thanks",
+            "thank",
+            "feel",
+            "think",
+            "why",
+            "how",
+            "who",
+            "favorite",
+            "know",
+            "talk",
+            "chat",
+            "explain",
+        }
+        if token_set & chat_tokens:
+            return True
         music_words = (
             "play",
             "song",
@@ -1137,27 +1170,11 @@ class MusicPlayerCLI:
             "recommend",
             "pick",
             "select",
+            "suggest",
         )
-        if any(word in text for word in music_words):
+        if token_set & set(music_words):
             return False
-        chat_words = (
-            "think",
-            "feel",
-            "what do you",
-            "tell me",
-            "explain",
-            "who",
-            "why",
-            "how",
-            "chat",
-            "talk",
-            "conversation",
-            "favorite",
-            "know",
-        )
-        if "?" in text:
-            return True
-        return any(word in text for word in chat_words)
+        return False
 
     @staticmethod
     def _looks_like_json(text: str) -> bool:
