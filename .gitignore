@@ -1,0 +1,23 @@
+# Byte-compiled / optimized files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.env
+.venv/
+env/
+venv/
+
+# Test artifacts
+.pytest_cache/
+.coverage
+coverage.xml
+
+# Editor and tooling junk
+.DS_Store
+.idea/
+.vscode/
+
+# Local config overrides
+config.local.json
