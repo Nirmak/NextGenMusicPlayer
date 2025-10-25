@@ -824,6 +824,8 @@ class MusicPlayerCLI:
             print("Playlist is empty.")
             return
 
+        chat_preferred = self._prompt_prefers_chat(prompt)
+
         messages = self._get_or_create_ai_session(model)
         user_message = self._build_ai_prompt(playlist, prompt)
         messages.append({"role": "user", "content": user_message})
@@ -836,7 +838,7 @@ class MusicPlayerCLI:
         chat_only = False
 
         for attempt in range(1, max_attempts + 1):
-            chat_kwargs: Dict[str, Any] = {"force_json": True}
+            chat_kwargs: Dict[str, Any] = {"force_json": not chat_preferred}
             printed_stream = False
             last_chunk_had_newline = True
 
@@ -878,7 +880,7 @@ class MusicPlayerCLI:
             except ValueError:
                 payload = None
 
-            if payload is None:
+            if payload is None or (chat_preferred and not self._looks_like_json(reply)):
                 if not printed_stream:
                     print(reply)
                 messages.append({"role": "assistant", "content": reply})
@@ -1015,9 +1017,9 @@ class MusicPlayerCLI:
         sections.append(f"User request: {prompt}")
         sections.append(
             'Respond with exactly one JSON object: {"indexes": [<int>, ...], "reason": "<short explanation>"}.\n'
-            "Always provide up to five unique song indexes (first = best match, rest = strong alternatives). "
-            "No extra keys, code fences, or commentary. Pick from the song list above unless the user explicitly requests spoken-word content. "
-            "Invalid JSON or empty index lists will be rejected."
+            "Always provide up to five unique song indexes (first = best match, rest = strong alternatives) when you are recommending songs. "
+            "If the listener is clearly just chatting or asking a question, respond in plain text without JSON. "
+            "Pick from the song list above unless the user explicitly requests spoken-word content. Invalid JSON or empty index lists will be rejected when a song response is required."
         )
         return "\n\n".join(sections)
 
@@ -1121,6 +1123,52 @@ class MusicPlayerCLI:
     @staticmethod
     def _track_category(track: Track) -> str:
         return (track.metadata.get("category") or track.category or "unknown").lower()
+
+    @staticmethod
+    def _prompt_prefers_chat(prompt: str) -> bool:
+        text = prompt.strip().lower()
+        if not text:
+            return False
+        music_words = (
+            "play",
+            "song",
+            "track",
+            "queue",
+            "recommend",
+            "pick",
+            "select",
+        )
+        if any(word in text for word in music_words):
+            return False
+        chat_words = (
+            "think",
+            "feel",
+            "what do you",
+            "tell me",
+            "explain",
+            "who",
+            "why",
+            "how",
+            "chat",
+            "talk",
+            "conversation",
+            "favorite",
+            "know",
+        )
+        if "?" in text:
+            return True
+        return any(word in text for word in chat_words)
+
+    @staticmethod
+    def _looks_like_json(text: str) -> bool:
+        stripped = text.strip()
+        if not stripped:
+            return False
+        if stripped[0] in "{" and stripped[-1] in "}":
+            return True
+        if stripped[0] in "[" and stripped[-1] in "]":
+            return True
+        return False
 
     def _sanitize_indexes(self, indexes: Iterable[int], playlist: List[Track], allow_spoken: bool = False) -> List[int]:
         sanitized: List[int] = []
@@ -1411,9 +1459,9 @@ class MusicPlayerCLI:
     def _build_system_prompt(self) -> str:
         context = self._system_context or "You are a helpful DJ assistant."
         instructions = (
-            "You must respond with exactly one JSON object of the form {\"indexes\": [<int>, ...], \"reason\": \"<short explanation>\"}.\n"
+            "When you are recommending music, respond with a JSON object of the form {\"indexes\": [<int>, ...], \"reason\": \"<short explanation>\"}.\n"
             "Always return up to five unique song indexes (first = best match to play now, the rest are alternatives).\n"
-            "Return JSON only—no narration before or after the object."
+            "If the listener is merely chatting or asking a question, reply in plain text instead and do not emit JSON."
         )
         catalog = self._ai_track_summary or "Playlist is currently empty."
         return (

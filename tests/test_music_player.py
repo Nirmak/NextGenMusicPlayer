@@ -344,7 +344,7 @@ class PlainTextResponseTests(unittest.TestCase):
 
         class ChatOllama:
             def chat(self, model, messages, stream_callback=None, *, force_json=False):
-                assert force_json
+                assert not force_json
                 return "Sure, let's talk about music preferences."
 
         player = DummyPlayer(playlist)
