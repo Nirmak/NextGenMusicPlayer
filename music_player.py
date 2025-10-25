@@ -851,7 +851,12 @@ class MusicPlayerCLI:
         song_count = sum(1 for track in playlist if self._track_category(track) == "song")
         spoken_count = len(playlist) - song_count
         sections.append(
-            f"Song inventory: {song_count} songs, {spoken_count} spoken-word tracks. Always choose a song unless the user explicitly requests otherwise."
+            "Song inventory statistics:"
+            f"\n- songs: {song_count}"
+            f"\n- spoken-word / episodic tracks: {spoken_count}"
+            "\nA metadata field named 'Category' is provided for every track in the playlist summary."
+            " When 'Category=song' you must treat it as music. If the category is anything else"
+            " (e.g., 'spoken-word'), treat it as narration/podcast and avoid it unless the user explicitly asks for it."
         )
         if self._history:
             recent = self._dedupe_preserve_order(self._history.recent_labels(limit=10))
@@ -864,6 +869,7 @@ class MusicPlayerCLI:
         sections.append(
             'Respond with exactly one JSON object: {"index": <int>, "reason": "<short explanation>"}.\n'
             "No extra keys, code fences, or commentary. Always pick a track (prefer one not in the recent list). "
+            "Only choose entries with Category=song unless the user explicitly requests spoken-word content. "
             "Invalid JSON or null indexes will be rejected."
         )
         return "\n\n".join(sections)
