@@ -1,8 +1,14 @@
+import contextlib
+import io
 import json
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from music_player import (
     MusicPlayerCLI,
@@ -17,12 +23,26 @@ class DummyPlayer:
     def __init__(self, playlist):
         self._playlist = list(playlist)
         self._callback = None
+        self.last_played = None
 
     def playlist(self):
         return list(self._playlist)
 
     def set_track_started_callback(self, callback):
         self._callback = callback
+
+    def play(self, index=None):
+        if not self._playlist:
+            return None
+        if index is None:
+            index = 0
+        if index < 0 or index >= len(self._playlist):
+            raise IndexError
+        track = self._playlist[index]
+        self.last_played = track
+        if self._callback:
+            self._callback(track)
+        return track
 
     def playlist_stats(self):
         total = len(self._playlist)
@@ -63,7 +83,9 @@ class PromptGenerationTests(unittest.TestCase):
             player,
             ollama_client=None,
             default_model="model",
+            catalog_path=None,
             history=history,
+            stream_ai=False,
         )
         cli._ai_track_summary = cli._generate_catalog_summary(playlist)
         return cli
@@ -114,7 +136,7 @@ class ResetHistoryTests(unittest.TestCase):
         player = DummyPlayer([Track('file:///1', 'One')])
         history = PlaybackHistory(None, max_entries=5)
         history.add(Track('file:///old', 'Old Song'))
-        cli = MusicPlayerCLI(player, history=history)
+        cli = MusicPlayerCLI(player, history=history, catalog_path=None, stream_ai=False)
         cli._reset_history()
         self.assertEqual(history.recent_labels(), [])
 
@@ -126,7 +148,12 @@ class ResponseParsingTests(unittest.TestCase):
             Track("file:///2", "Two"),
             Track("file:///3", "Three"),
         ]
-        self.cli = MusicPlayerCLI(DummyPlayer(self.playlist), default_model="model")
+        self.cli = MusicPlayerCLI(
+            DummyPlayer(self.playlist),
+            default_model="model",
+            catalog_path=None,
+            stream_ai=False,
+        )
 
     def test_numeric_track_field(self):
         payload = {"track": 2}
@@ -166,6 +193,44 @@ class ResponseParsingTests(unittest.TestCase):
         raw = "<think>internal</think>{\"index\": 1}"
         data = MusicPlayerCLI._parse_ai_payload(raw)
         self.assertEqual(data, {"index": 1})
+
+
+class StreamingOutputTests(unittest.TestCase):
+    def test_cli_streams_ai_response(self):
+        playlist = [
+            Track("file:///0", "Zero"),
+            Track("file:///1", "One"),
+        ]
+
+        class DummyOllama:
+            def __init__(self):
+                self.stream_used = False
+
+            def chat(self, model, messages, stream_callback=None):
+                parts = ['{"index": 1, "reason": "Tes', 't stream"}']
+                if stream_callback:
+                    self.stream_used = True
+                    for chunk in parts:
+                        stream_callback(chunk)
+                return "".join(parts)
+
+        player = DummyPlayer(playlist)
+        ollama = DummyOllama()
+        cli = MusicPlayerCLI(
+            player,
+            ollama_client=ollama,
+            default_model="model",
+            catalog_path=None,
+        )
+
+        with contextlib.redirect_stdout(io.StringIO()) as buffer:
+            cli._cmd_ai(["Pick", "something"])
+        output = buffer.getvalue()
+
+        self.assertTrue(ollama.stream_used)
+        self.assertIn("AI response (streaming):", output)
+        self.assertIn('{"index": 1, "reason": "Test stream"}', output)
+        self.assertIn("AI selected [1]: One", output)
 
 
 if __name__ == "__main__":

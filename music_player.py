@@ -375,20 +375,51 @@ class OllamaClient:
         self._base_url = base_url.rstrip('/')
         self._requests = requests
 
-    def chat(self, model: str, messages: List[Dict[str, str]]) -> str:
+    def chat(
+        self,
+        model: str,
+        messages: List[Dict[str, str]],
+        stream_callback: Optional[Callable[[str], None]] = None,
+    ) -> str:
         url = f"{self._base_url}/api/chat"
-        payload = {"model": model, "messages": messages, "stream": False}
+        stream = stream_callback is not None
+        payload = {"model": model, "messages": messages, "stream": stream}
         try:
-            response = self._requests.post(url, json=payload, timeout=120)
+            response = self._requests.post(url, json=payload, timeout=120, stream=stream)
         except self._requests.RequestException as exc:  # pragma: no cover
             raise ConnectionError(f"Failed to reach Ollama at {url}: {exc}") from exc
         if response.status_code != 200:
-            raise RuntimeError(f"Ollama request failed ({response.status_code}): {response.text}")
-        data = response.json()
-        message = data.get("message") or {}
-        content = message.get("content")
+            body = response.text if not stream else response.content.decode("utf-8", errors="replace")
+            raise RuntimeError(f"Ollama request failed ({response.status_code}): {body}")
+        if not stream:
+            data = response.json()
+            message = data.get("message") or {}
+            content = message.get("content")
+            if not content:
+                raise ValueError("Ollama response missing assistant content.")
+            return content
+
+        chunks: List[str] = []
+        for raw in response.iter_lines(decode_unicode=True):
+            if not raw:
+                continue
+            try:
+                event = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if event.get("error"):
+                raise RuntimeError(f"Ollama error: {event['error']}")
+            message = event.get("message") or {}
+            delta = message.get("content") or ""
+            if delta:
+                chunks.append(delta)
+                if stream_callback:
+                    stream_callback(delta)
+            if event.get("done"):
+                break
+        content = "".join(chunks)
         if not content:
-            raise ValueError("Ollama response missing assistant content.")
+            raise ValueError("Ollama stream produced no content.")
         return content
 
 
@@ -401,6 +432,7 @@ class MusicPlayerCLI:
         catalog_path: Optional[Union[str, Path]] = "playlist_catalog.txt",
         system_context: Optional[str] = None,
         history: Optional[PlaybackHistory] = None,
+        stream_ai: bool = True,
     ) -> None:
         self._player = player
         self._ollama = ollama_client
@@ -411,6 +443,7 @@ class MusicPlayerCLI:
         self._history = history
         self._ai_sessions: Dict[str, List[Dict[str, str]]] = {}
         self._session_messages: List[Dict[str, str]] = []
+        self._stream_ai = stream_ai
 
         self._player.set_track_started_callback(self._on_track_started)
 
@@ -593,11 +626,40 @@ class MusicPlayerCLI:
         user_message = self._build_ai_prompt(playlist, prompt)
         messages.append({"role": "user", "content": user_message})
 
+        chat_kwargs: Dict[str, Any] = {}
+        printed_stream = False
+        last_chunk_had_newline = True
+        if self._stream_ai:
+            def handle_chunk(chunk: str) -> None:
+                nonlocal printed_stream, last_chunk_had_newline
+                if not printed_stream:
+                    print("AI response (streaming):", flush=True)
+                    printed_stream = True
+                sys.stdout.write(chunk)
+                sys.stdout.flush()
+                last_chunk_had_newline = chunk.endswith("\n")
+
+            chat_kwargs["stream_callback"] = handle_chunk
+
         try:
-            reply = self._ollama.chat(model, messages)
+            reply = self._ollama.chat(model, messages, **chat_kwargs)
+        except TypeError:
+            if chat_kwargs:
+                print("AI client does not support streaming; falling back to buffered response.")
+                reply = self._ollama.chat(model, messages)
+                printed_stream = False
+                last_chunk_had_newline = True
+            else:
+                messages.pop()
+                raise
         except Exception as exc:  # pragma: no cover
+            if printed_stream and not last_chunk_had_newline:
+                print()
             messages.pop()
             raise RuntimeError(f"Ollama request failed: {exc}") from exc
+
+        if printed_stream and not last_chunk_had_newline:
+            print()
 
         messages.append({"role": "assistant", "content": reply})
         self._trim_ai_history(model)

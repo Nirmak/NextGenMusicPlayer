@@ -5,6 +5,7 @@ This project is a terminal-first music player that wraps GStreamer playback with
 - CLI-driven playback: load directories, start/stop music, navigate the queue, and inspect the playlist without leaving the terminal.
 - Flexible media sources: works with normal folders, `file://` URIs, and remote shares (e.g., SMB) through Gio.
 - AI track selection: optional integration with an Ollama model that receives playlist metadata, a configurable DJ persona, and recent history before recommending a track.
+- Live streaming of AI responses so you can watch progress instead of waiting on a blank terminal.
 - Automatic cataloguing: exports the loaded playlist to `playlist_catalog.txt` and stores recent selections in `playback_history.json`.
 - Metadata awareness: extracts tags with Mutagen when available and infers missing titles/artists from file paths.
 
@@ -77,6 +78,7 @@ When AI support is enabled:
 2. `dj_context.txt` (or your custom file) is merged with instructions about response format.
 3. Recent plays from `playback_history.json` are deduplicated and inserted into the system prompt.
 4. Free-form input or `/ai ...` calls `OllamaClient`, which must return a JSON snippet such as `{"index": 5, "reason": "High energy rock"}`. The CLI validates and executes the response.
+5. While the model composes a reply, its output streams live in the terminal so you can confirm it is still working.
 
 Replace `dj_context.txt` to change the model’s persona or constraints. To disable AI completely, set `ollama_url` to an empty string in the config or use `--ollama-url ""` at runtime.
 
