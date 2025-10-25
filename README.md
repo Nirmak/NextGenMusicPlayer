@@ -42,7 +42,7 @@ On other platforms install the equivalent GStreamer and PyGObject packages befor
 | Key | Description |
 | --- | --- |
 | `default_music_uri` | Directory or URI to preload on startup (e.g., `/media/music`, `smb://server/share/music`). |
-| `default_ai_model` | Model name to request from Ollama (e.g., `deepseek-r1:8b`). Leave unset to require `--model` in AI commands. |
+| `default_ai_model` | Model name to request from Ollama (e.g., `llama3.1:8b`). Leave unset to require `--model` in AI commands. |
 | `ollama_url` | Base URL for the Ollama server. Set to `""` to disable AI features. |
 | `ai_catalog_path` | Where to write the generated playlist catalog. Relative paths resolve against the config file location. |
 | `ai_context_path` | Path to a text file whose contents seed the system prompt (e.g., `dj_context.txt`). |
