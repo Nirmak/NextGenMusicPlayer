@@ -841,15 +841,29 @@ class MusicPlayerCLI:
         return session
 
     def _build_ai_prompt(self, playlist: List[Track], prompt: str, limit: int = 50) -> str:
-        summary_lines = [
-            self._render_track_line(idx, track)
-            for idx, track in enumerate(playlist[:limit])
+        song_entries: List[Tuple[int, Track]] = [
+            (idx, track) for idx, track in enumerate(playlist) if self._track_category(track) == "song"
         ]
-        if len(playlist) > limit:
-            summary_lines.append(f"... ({len(playlist) - limit} more tracks omitted)")
-        sections = ["Playlist:\n" + "\n".join(summary_lines)]
-        song_count = sum(1 for track in playlist if self._track_category(track) == "song")
-        spoken_count = len(playlist) - song_count
+        spoken_entries: List[Tuple[int, Track]] = [
+            (idx, track) for idx, track in enumerate(playlist) if self._track_category(track) != "song"
+        ]
+
+        song_lines = [self._render_track_line(idx, track) for idx, track in song_entries[:limit]]
+        if len(song_entries) > limit:
+            song_lines.append(f"... ({len(song_entries) - limit} more songs omitted)")
+        sections = ["Available songs (primary selection pool):\n" + ("\n".join(song_lines) if song_lines else "<none>")]
+
+        if spoken_entries:
+            spoken_lines = [self._render_track_line(idx, track) for idx, track in spoken_entries[:10]]
+            if len(spoken_entries) > 10:
+                spoken_lines.append(f"... ({len(spoken_entries) - 10} more spoken-word tracks omitted)")
+            sections.append(
+                "Spoken-word / episodic tracks (avoid unless user explicitly asks):\n"
+                + "\n".join(spoken_lines)
+            )
+
+        song_count = len(song_entries)
+        spoken_count = len(spoken_entries)
         sections.append(
             "Song inventory statistics:"
             f"\n- songs: {song_count}"
@@ -868,8 +882,7 @@ class MusicPlayerCLI:
         sections.append(f"User request: {prompt}")
         sections.append(
             'Respond with exactly one JSON object: {"index": <int>, "reason": "<short explanation>"}.\n'
-            "No extra keys, code fences, or commentary. Always pick a track (prefer one not in the recent list). "
-            "Only choose entries with Category=song unless the user explicitly requests spoken-word content. "
+            "No extra keys, code fences, or commentary. Pick from the song list above unless the user explicitly requests spoken-word content. "
             "Invalid JSON or null indexes will be rejected."
         )
         return "\n\n".join(sections)
@@ -1186,8 +1199,8 @@ class MusicPlayerCLI:
     def _build_system_prompt(self) -> str:
         context = self._system_context or "You are a helpful DJ assistant."
         instructions = (
-            "You must respond with exactly one JSON object of the form {\"index\": <int|null>, \"reason\": \"<short explanation>\"}.\n"
-            "Always return an integer index when selecting a track, even if it was played recently.\n"
+            "You must respond with exactly one JSON object of the form {\"index\": <int>, \"reason\": \"<short explanation>\"}.\n"
+            "You must always return an integer index referencing a song from the playlist summary.\n"
             "Return JSON only—no narration before or after the object."
         )
         recent = self._recent_history_summary()
