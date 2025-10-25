@@ -142,6 +142,18 @@ class MetadataAugmentationTests(unittest.TestCase):
         metadata = _augment_metadata_from_label(label, {'Album': 'Proper Album'})
         self.assertEqual(metadata.get('album'), 'Proper Album')
 
+    def test_infer_category_marks_episode(self):
+        from music_player import _infer_track_category
+        label = 'Banal Fantasy/Banal Fantasy - Episode 24.mp3'
+        metadata = {'title': 'Banal Fantasy - Episode 24'}
+        self.assertEqual(_infer_track_category(label, metadata), 'spoken-word')
+
+    def test_infer_category_defaults_to_song(self):
+        from music_player import _infer_track_category
+        label = 'Artist/Album/Regular Song.mp3'
+        metadata = {'title': 'Regular Song'}
+        self.assertEqual(_infer_track_category(label, metadata), 'song')
+
 class ResetHistoryTests(unittest.TestCase):
     def test_reset_history(self):
         from music_player import MusicPlayerCLI, PlaybackHistory, Track, MusicPlayer

@@ -41,6 +41,7 @@ class Track:
     uri: str
     label: str
     metadata: Dict[str, str] = field(default_factory=dict)
+    category: str = "song"
 
 
 def _has_supported_extension(name: str) -> bool:
@@ -129,6 +130,61 @@ def _augment_metadata_from_label(label: str, metadata: Dict[str, str]) -> Dict[s
     return updated
 
 
+_SPOKEN_KEYWORDS = {
+    "episode",
+    "ep.",
+    " ep ",
+    "podcast",
+    "audiobook",
+    "audio drama",
+    "radio drama",
+    "radioplay",
+    "story",
+    "stories",
+    "narration",
+    "narrative",
+    "minutes du peuple",
+    "banal fantasy",
+    "sketch",
+    "skit",
+    "sketches",
+    "teaser",
+    "trailer",
+    "bande annonce",
+    "announcement",
+    "monologue",
+    "dialogue",
+    "scene",
+    "chapter",
+    "act ",
+    "scene ",
+    "bonus episode",
+    "commentary",
+    "interview",
+    "audioplay",
+    "audio-play",
+    "audio play",
+}
+
+
+def _infer_track_category(label: str, metadata: Dict[str, str]) -> str:
+    components: List[str] = [label.lower()]
+    for key in ("title", "album", "genre", "comment", "description"):
+        value = metadata.get(key)
+        if value:
+            components.append(str(value).lower())
+    combined = " ".join(components)
+    if re.search(r"\bepisode\s*\d+\b", combined):
+        return "spoken-word"
+    if re.search(r"\bs\d+e\d+\b", combined):
+        return "spoken-word"
+    if "minutes du peuple" in combined:
+        return "spoken-word"
+    if any(keyword in combined for keyword in _SPOKEN_KEYWORDS):
+        return "spoken-word"
+    return "song"
+
+
 def _collect_local_tracks(root: Path) -> List[Track]:
     if not root.exists() or not root.is_dir():
         raise ValueError(f"Directory '{root}' does not exist or is not a directory.")
@@ -137,7 +193,9 @@ def _collect_local_tracks(root: Path) -> List[Track]:
         if path.is_file() and _has_supported_extension(path.name):
             rel = path.relative_to(root).as_posix()
             metadata = _augment_metadata_from_label(rel, _extract_metadata(path))
-            tracks.append(Track(path.resolve().as_uri(), rel, metadata))
+            category = _infer_track_category(rel, metadata)
+            metadata.setdefault("category", category)
+            tracks.append(Track(path.resolve().as_uri(), rel, metadata, category))
     return tracks
 
 
@@ -166,7 +224,10 @@ def _collect_gio_tracks(uri: str) -> List[Track]:
                 if file_type == Gio.FileType.DIRECTORY:
                     walk(child, f"{rel_name}/")
                 elif file_type == Gio.FileType.REGULAR and _has_supported_extension(name):
-                    tracks.append(Track(child.get_uri(), rel_name, _augment_metadata_from_label(rel_name, {})))
+                    metadata = _augment_metadata_from_label(rel_name, {})
+                    category = _infer_track_category(rel_name, metadata)
+                    metadata.setdefault("category", category)
+                    tracks.append(Track(child.get_uri(), rel_name, metadata, category))
         finally:
             enumerator.close(None)
 
@@ -655,6 +716,7 @@ class MusicPlayerCLI:
         user_message = self._build_ai_prompt(playlist, prompt)
         messages.append({"role": "user", "content": user_message})
 
+        allow_spoken = self._prompt_allows_spoken(prompt)
         max_attempts = 3
         payload: Optional[Dict[str, Any]] = None
         reply = ""
@@ -695,20 +757,35 @@ class MusicPlayerCLI:
             if printed_stream and not last_chunk_had_newline:
                 print()
 
+            candidate_track: Optional[Track] = None
             try:
                 payload = self._parse_ai_payload(reply)
                 self._validate_ai_payload(payload)
-            except ValueError as exc:
+                candidate_index = payload["index"]
+                if candidate_index < 0 or candidate_index >= len(playlist):
+                    raise ValueError("Selected index is out of range.")
+                candidate_track = playlist[candidate_index]
+                category = self._track_category(candidate_track)
+                if category != "song" and not allow_spoken:
+                    raise ValueError(
+                        f"Selected track '{candidate_track.label}' is categorized as {category}."
+                    )
+            except (ValueError, IndexError) as exc:
                 print(f"AI response invalid (attempt {attempt}/{max_attempts}): {exc}")
                 messages.append({"role": "assistant", "content": reply})
-                correction = (
-                    "That reply was invalid. Respond again with exactly one JSON object "
-                    '{"index": <int>, "reason": "<short explanation>"} using valid JSON syntax. '
-                    "Always choose a track—never reply with null or say nothing fits."
-                )
+                if candidate_track and self._track_category(candidate_track) != "song" and not allow_spoken:
+                    correction = (
+                        f"'{candidate_track.label}' is not a music track. Please choose a song that sounds like actual music."
+                    )
+                else:
+                    correction = (
+                        "That reply was invalid. Respond again with exactly one JSON object "
+                        '{"index": <int>, "reason": "<short explanation>"} using valid JSON syntax. '
+                        "Always choose a track—never reply with null or say nothing fits."
+                    )
                 messages.append({"role": "user", "content": correction})
                 if attempt >= max_attempts:
-                    fallback_index = self._fallback_track_index(playlist)
+                    fallback_index = self._fallback_track_index(playlist, allow_spoken)
                     if fallback_index is None:
                         raise RuntimeError("AI failed to provide a valid JSON response.") from exc
                     payload = {
@@ -723,7 +800,7 @@ class MusicPlayerCLI:
             break
 
         if payload is None:
-            fallback_index = self._fallback_track_index(playlist)
+            fallback_index = self._fallback_track_index(playlist, allow_spoken)
             if fallback_index is None:
                 raise RuntimeError("AI failed to provide a response.")
             payload = {
@@ -735,7 +812,7 @@ class MusicPlayerCLI:
 
         index, reason = self._interpret_ai_choice(payload, playlist)
         if index is None:
-            fallback_index = self._fallback_track_index(playlist)
+            fallback_index = self._fallback_track_index(playlist, allow_spoken)
             if fallback_index is None:
                 print(f"AI response: {reason or json.dumps(payload, indent=2)}")
                 return
@@ -771,6 +848,11 @@ class MusicPlayerCLI:
         if len(playlist) > limit:
             summary_lines.append(f"... ({len(playlist) - limit} more tracks omitted)")
         sections = ["Playlist:\n" + "\n".join(summary_lines)]
+        song_count = sum(1 for track in playlist if self._track_category(track) == "song")
+        spoken_count = len(playlist) - song_count
+        sections.append(
+            f"Song inventory: {song_count} songs, {spoken_count} spoken-word tracks. Always choose a song unless the user explicitly requests otherwise."
+        )
         if self._history:
             recent = self._dedupe_preserve_order(self._history.recent_labels(limit=10))
             if recent:
@@ -813,7 +895,7 @@ class MusicPlayerCLI:
         if not isinstance(reason, str) or not reason.strip():
             raise ValueError("Field 'reason' must be a non-empty string.")
 
-    def _fallback_track_index(self, playlist: List[Track]) -> Optional[int]:
+    def _fallback_track_index(self, playlist: List[Track], allow_spoken: bool = False) -> Optional[int]:
         if not playlist:
             return None
         history_labels: List[str] = []
@@ -822,10 +904,60 @@ class MusicPlayerCLI:
                 self._history.recent_labels(limit=len(playlist) * 2)
             )
         history_set = set(history_labels)
+
+        def category(track: Track) -> str:
+            return self._track_category(track)
+
+        def candidates(prefer_songs: bool) -> Iterable[int]:
+            for idx, track in enumerate(playlist):
+                is_song = category(track) == "song"
+                if prefer_songs and not is_song:
+                    continue
+                if track.label in history_set:
+                    continue
+                yield idx
+
+        # First try unheard songs
+        for idx in candidates(prefer_songs=not allow_spoken):
+            return idx
+
+        # Then allow repeats but still prioritise songs unless user explicitly asked
+        if not allow_spoken:
+            for idx, track in enumerate(playlist):
+                if category(track) == "song":
+                    return idx
+
+        # Finally return first unheard item of any category or default to first track
         for idx, track in enumerate(playlist):
             if track.label not in history_set:
                 return idx
         return 0
+
+    @staticmethod
+    def _prompt_allows_spoken(prompt: str) -> bool:
+        text = prompt.lower()
+        keywords = (
+            "podcast",
+            "episode",
+            "audio drama",
+            "audiobook",
+            "story",
+            "narrative",
+            "radio",
+            "skit",
+            "sketch",
+            "comedy",
+            "banal fantasy",
+            "minutes du peuple",
+            "interview",
+            "spoken",
+            "talk",
+        )
+        return any(word in text for word in keywords)
+
+    @staticmethod
+    def _track_category(track: Track) -> str:
+        return (track.metadata.get("category") or track.category or "unknown").lower()
 
     def _interpret_ai_choice(
         self, payload: Dict[str, Any], playlist: List[Track]
@@ -1101,7 +1233,7 @@ class MusicPlayerCLI:
 
     @staticmethod
     def _metadata_summary(metadata: Dict[str, str]) -> str:
-        order = ["title", "artist", "album", "genre", "date", "tracknumber"]
+        order = ["title", "artist", "album", "genre", "date", "tracknumber", "category"]
         parts = [f"{key.capitalize()}={metadata[key]}" for key in order if metadata.get(key)]
         if not parts:
             parts = [f"{k}={v}" for k, v in metadata.items() if v]
